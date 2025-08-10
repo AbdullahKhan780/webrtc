@@ -9,8 +9,13 @@ type MediaConnection = ReturnType<Peer["call"]>;
 function App() {
   // Holds the PeerJS instance
   const PeerJS = React.useRef<Peer | null>(null);
-  // Holds the current call state
-  const ActiveCall = React.useRef<MediaConnection | null | undefined>(null);
+  // Store streams for recording
+  const LocalStream = React.useRef<MediaStream | null>(null);
+  const RemoteStream = React.useRef<MediaStream | null>(null);
+
+  const [ActiveCall, setActiveCall] = React.useState<
+    MediaConnection | null | undefined
+  >(null);
 
   const [PeerID, setPeerID] = React.useState("");
   const [RemotePeerID, setRemotePeerID] = React.useState("");
@@ -29,24 +34,50 @@ function App() {
     PeerJS.current.on("call", async (call) => {
       const Stream = await getUserMedia();
 
-      if (Stream) call.answer(Stream);
-      else console.error("getUserMedia is not supported in this browser");
+      if (Stream) {
+        LocalStream.current = Stream;
+
+        // Display local video
+        if (CurrentUserVideoRef.current) {
+          CurrentUserVideoRef.current.srcObject = Stream;
+        }
+
+        call.answer(Stream);
+        setActiveCall(call);
+
+        // Handle incoming remote stream
+        call.on("stream", (remoteStream) => {
+          console.log("Received remote stream");
+          RemoteStream.current = remoteStream;
+
+          if (RemoteVideoRef.current) {
+            RemoteVideoRef.current.srcObject = remoteStream;
+          }
+        });
+
+        call.on("close", () => {
+          console.log("Call closed by remote peer");
+          CloseCall();
+        });
+      } else {
+        console.error("getUserMedia is not supported in this browser");
+      }
     });
+
+    console.log('hello', RemoteStream.current, LocalStream.current);
 
     return () => {
       PeerJS.current?.off("open");
       PeerJS.current?.off("call");
-
       PeerJS.current = null;
     };
   }, []);
 
   const getUserMedia = async () => {
     try {
-      // Directly use the standard API (most browsers support this)
       if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
         return await navigator.mediaDevices.getUserMedia({
-          video: false,
+          video: true,
           audio: true,
         });
       } else {
@@ -54,53 +85,78 @@ function App() {
       }
     } catch (error) {
       console.error("Error accessing media devices", error);
+      return null;
     }
   };
 
   const InitCall = async (id: string) => {
+    if (!id.trim()) {
+      console.error("Please enter a valid peer ID");
+      return;
+    }
+
     const Stream = await getUserMedia();
 
-    if (CurrentUserVideoRef.current)
-      CurrentUserVideoRef.current.srcObject = Stream ?? null;
-
     if (Stream) {
+      LocalStream.current = Stream;
+
+      // Display local video
+      if (CurrentUserVideoRef.current) {
+        CurrentUserVideoRef.current.srcObject = Stream;
+      }
+
       const Call = PeerJS.current?.call(id, Stream);
 
-      ActiveCall.current = Call;
+      setActiveCall(Call);
 
-      Call?.on("stream", (remoteStream) => {
-        if (RemoteVideoRef.current)
-          RemoteVideoRef.current.srcObject = remoteStream;
-      });
-    } else console.error("getUserMedia is not supported in this browser");
+      if (Call) {
+        Call.on("stream", (remoteStream) => {
+          console.log("Received remote stream");
+          RemoteStream.current = remoteStream;
+
+          if (RemoteVideoRef.current) {
+            RemoteVideoRef.current.srcObject = remoteStream;
+          }
+        });
+
+        Call.on("close", () => {
+          console.log("Call closed");
+          CloseCall();
+        });
+
+        Call.on("error", (err) => {
+          console.error("Call error:", err);
+        });
+      }
+    } else {
+      console.error("Could not get user media");
+    }
   };
 
   const CloseCall = () => {
-    // Stop the local stream tracks
-    if (ActiveCall.current) {
-      // Stop all the local media tracks (audio/video)
-      const senders = ActiveCall.current.peerConnection.getSenders();
-      senders.forEach((sender) => {
-        const track = sender.track;
-        if (track) {
-          track.stop(); // Stop each media track
-        }
+    // Stop local stream tracks
+    if (LocalStream.current) {
+      LocalStream.current.getTracks().forEach((track) => {
+        track.stop();
       });
-
-      // Close the PeerJS call
-      ActiveCall.current.close();
-      ActiveCall.current = null; // Clear the current call reference
-
-      // Optionally reset video elements
-      if (CurrentUserVideoRef.current) {
-        CurrentUserVideoRef.current.srcObject = null;
-      }
-      if (RemoteVideoRef.current) {
-        RemoteVideoRef.current.srcObject = null;
-      }
-
-      console.log("Call ended and resources released.");
+      LocalStream.current = null;
     }
+
+    // Clear remote stream reference
+    RemoteStream.current = null;
+
+    // Close the PeerJS call
+    setActiveCall(null);
+
+    // Clear video elements
+    if (CurrentUserVideoRef.current) {
+      CurrentUserVideoRef.current.srcObject = null;
+    }
+    if (RemoteVideoRef.current) {
+      RemoteVideoRef.current.srcObject = null;
+    }
+
+    console.log("Call ended and resources released.");
   };
 
   return (
@@ -115,29 +171,57 @@ function App() {
       </div>
       <h1>Web-RTC</h1>
       {PeerID && <p>ID:: {PeerID}</p>}
+
       <div style={{ display: "flex", flexDirection: "column" }}>
         <div className="card" style={{ width: "100%" }}>
           <input
             name="remotePeer"
             type="text"
             value={RemotePeerID}
-            style={{ padding: 10, flex: 2 }}
+            placeholder="Enter remote peer ID"
+            style={{ padding: 8, width: "100%" }}
             onChange={(e) => setRemotePeerID(e.target.value)}
           />
-          <button onClick={() => InitCall(RemotePeerID)} style={{ flex: 1 }}>
-            Start call
-          </button>
-          <button
-            onClick={() => CloseCall()}
-            style={{ flex: 1, backgroundColor: "red" }}
-          >
-            Stop call
-          </button>
+          <div style={{ display: "flex", gap: 10, width: "100%" }}>
+            <button
+              onClick={() => InitCall(RemotePeerID)}
+              style={{ flex: 1 }}
+              disabled={!RemotePeerID.trim() || !!ActiveCall}
+            >
+              Start call
+            </button>
+            <button
+              onClick={() => CloseCall()}
+              style={{ flex: 1, backgroundColor: "red" }}
+              disabled={!ActiveCall}
+            >
+              Stop call
+            </button>
+          </div>
         </div>
 
-        <div style={{ display: "flex" }}>
-          <video ref={CurrentUserVideoRef} autoPlay />
-          <video ref={RemoteVideoRef} autoPlay />
+        <div style={{ display: "flex", gap: 20, width: "100%" }}>
+          <div>
+            <h3>Your Video</h3>
+            <video
+              ref={CurrentUserVideoRef}
+              autoPlay
+              muted
+              width="300"
+              height="200"
+              style={{ border: "2px solid #ccc" }}
+            />
+          </div>
+          <div>
+            <h3>Remote Video</h3>
+            <video
+              ref={RemoteVideoRef}
+              autoPlay
+              width="300"
+              height="200"
+              style={{ border: "2px solid #ccc" }}
+            />
+          </div>
         </div>
       </div>
     </>
